@@ -1,0 +1,106 @@
+#!/bin/bash
+
+function custom(){
+    echo "Removing CUSTOM_IP set..."
+    prts=$(iptables -nvL INPUT | grep "CUSTOM_IP" | awk '{print $15}')
+    iptables -D INPUT -p tcp -m set --match-set CUSTOM_IP src -m multiport --dport ${prts} -j REJECT 2>/dev/null
+    ipset destroy CUSTOM_IP
+    ipset -N CUSTOM_IP hash:net
+    echo "Creating CUSTOM_IP set..."
+    for i in $(cat custom.zone); do ipset -A CUSTOM_IP $i; done
+    echo "Creating rules for CUSTOM_IP set..."
+    iptables -A INPUT -p tcp -m set --match-set CUSTOM_IP src -m multiport --dports ${ports} -j REJECT
+}
+
+function tablecheck(){
+    iptables -S INPUT | grep -v ACCEPT 
+}
+
+# Check for ipset
+which ipset >/dev/null
+case $? in
+1) echo "ipset not found on system.  Please install ipset application."
+exit 1;;
+0);;
+esac
+
+
+# Check for root
+if [ "$EUID" -ne 0 ]; then
+  echo "Please run this script as root"
+  exit 1
+fi
+
+# Set ports
+ports=22,10000
+
+# Check for country codes, if none, print list.
+if [[ $@ == "" ]]; then
+    curl https://www.ipdeny.com/ipblocks/ 2>/dev/null | grep "<td>" | awk -F'<p>' '{print $2}' | awk -F'[' '{print $1}' | grep -v -e '^$'
+    echo "Choose any of the countries by typing in the two letter code between the ( )."
+    exit
+fi
+
+if [[ $1 == "custom" ]]; then
+    if [ ! -f custom.zone ]; then
+        echo "Missing custom.zone file.  Please create custom.zone file with IP addresses for blocking."
+        exit
+    fi
+    custom
+    tablecheck
+    exit
+fi
+
+
+#Set ISO to country code(s).
+ISO=$@
+
+#Start Loop for country IP blocks and creating IPTABLES chain(s).
+for c in $ISO; do
+
+    #Convert to lowercase.  If already lowercase, ignored.
+    c=$(echo $c | awk '{print tolower($0)}')
+    #Match code to country name
+    country=$(curl https://www.ipdeny.com/ipblocks/ 2>/dev/null | grep \($(echo $c | awk '{print toupper($0)}')\) | awk -F'<p>' '{print $2}' | awk -F'(' '{print $1}' | sed 's/ //g' | sed 's/,//g')
+
+    # Truncate to 31 characters if too long.
+    country=${country:0:31}
+    echo "Got country $country..."
+
+    echo "Removing Existing Rule for $country (if any)..."
+    prts=$(iptables -nvL INPUT | grep "$country" | awk '{print $15}')
+    iptables -D INPUT -p tcp -m set --match-set "$country" src -m multiport --dport ${prts} -j REJECT 2>/dev/null
+    ipset destroy $country
+    ipset -N $country hash:net
+    rm $c.zone 2>/dev/null
+
+    echo "Downloading IP block for $country..."
+    wget -P . https://www.ipdeny.com/ipblocks/data/countries/$c.zone 2>/dev/null
+    echo "Checking for invalid IP ranges in $country zone..."
+    for i in $(seq 1 7); do grep "/$i$" $c.zone; if [[ $? == "0" ]]; then sed -i "s/\/${i}$/\/24/" $c.zone; echo "Fixed..."; fi; done
+    echo "Creating iptable block for $country..."
+    for i in $(cat $c.zone); do ipset -A "$country" $i; done
+
+    echo "Adding rule to firewall..."
+    iptables -A INPUT -p tcp -m set --match-set "$country" src -m multiport --dports ${ports} -j REJECT
+
+    echo "Added Firewall Rule for $country"
+    rm $c.zone 2>/dev/null
+done
+
+if [[ $# == "1" || $1 -ne "custom" ]]; then
+    tablecheck
+else
+    if [ ! -f custom.zone ]; then
+        echo "Missing custom.zone file.  Please create custom.zone file with IP addresses for blocking."
+        tablecheck
+        exit
+    fi
+    custom
+fi
+
+if [[ $# -ne "1" ]]; then
+    tablecheck
+fi
+
+#iptables -S INPUT | grep -v ACCEPT 

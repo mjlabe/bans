@@ -1,0 +1,4 @@
+#!/bin/bash
+
+cd /home/nevermorefu/bans/
+./country_block.bsh $(./country_block.bsh | awk -F '[()]' '{print $(NF-1)}' | grep -v "US")
